@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="no">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Dott-spill</title>
+  <style>
+    :root {
+      --gap: 10px;
+      --container-size: 85vmin; /* oppdaters til min(vw,vh) i JS for bedre mobilstøtte */
+      --dot-scale: 0.7; /* hvor stor dot i cella (0–1) */
+      --accent: #ffffff;
+      --bg: #000000;
+    }
+
+    /* Reset */
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--accent);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    /* Hel-skjerm scene */
+    .stage {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center; /* midt på skjermen */
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Kvadratisk beholder som holder rutenettet */
+    .board {
+      width: var(--container-size);
+      height: var(--container-size);
+      display: grid;
+      gap: var(--gap);
+      place-content: center;
+      /* grid-kolonner/-rader settes av JS: grid-template-columns: repeat(n, 1fr) */
+    }
+
+    /* Én “celle” i rutenettet (for jevn spacing) */
+    .cell {
+      position: relative;
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1 / 1;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    /* Selve dotten */
+    .dot {
+      width: 100%;
+      height: 100%;
+      max-width: 100%;
+      max-height: 100%;
+      transform: scale(var(--dot-scale));
+      border-radius: 50%;
+      background: var(--accent);
+      border: none;
+      padding: 0;
+      display: block;
+      cursor: pointer;
+      transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dot:active { transform: scale(calc(var(--dot-scale) * 0.9)); }
+
+    /* UI øverst */
+    .hud {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      background: rgba(255,255,255,0.06);
+      color: var(--accent);
+      border: 1px solid rgba(255,255,255,0.12);
+      padding: 8px 12px;
+      border-radius: 999px;
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      user-select: none;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      opacity: 0;
+      background: rgba(255,255,255,0.1);
+      color: var(--accent);
+      border: 1px solid rgba(255,255,255,0.15);
+      padding: 10px 14px;
+      border-radius: 10px;
+      transition: opacity 180ms ease, transform 180ms ease;
+      pointer-events: none;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* Liten “feil”-effekt */
+    @keyframes shake {
+      0% { transform: translateX(0); }
+      25% { transform: translateX(-4px); }
+      50% { transform: translateX(4px); }
+      75% { transform: translateX(-2px); }
+      100% { transform: translateX(0); }
+    }
+    .wrong { animation: shake 180ms ease; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div class="board" id="board" aria-live="polite"></div>
+  </div>
+  <div class="hud" id="hud">Level 1 • 1 dott</div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    // --- Grunnlogikk ---
+    const board = document.getElementById('board');
+    const hud = document.getElementById('hud');
+    const toast = document.getElementById('toast');
+
+    let level = 1;
+    let correctIndex = 0;
+
+    // Sikrere 100vh på mobil (adressefelt-variabler, notch osv.)
+    function updateContainerSize() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const size = Math.min(w, h) * 0.9; // 90% av korteste side
+      document.documentElement.style.setProperty('--container-size', `${size}px`);
+    }
+    window.addEventListener('resize', updateContainerSize);
+    updateContainerSize();
+
+    function dotsForLevel(lvl) {
+      // n = 2^(lvl-1)
+      return Math.pow(2, Math.max(0, lvl - 1));
+    }
+
+    function gridSide(n) {
+      // så kvadratisk som mulig
+      return Math.ceil(Math.sqrt(n));
+    }
+
+    function vibrate(ms) {
+      if ('vibrate' in navigator) navigator.vibrate(ms);
+    }
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => toast.classList.remove('show'), 900);
+    }
+
+    function updateHUD(n) {
+      const label = n === 1 ? 'dott' : 'dotter';
+      hud.textContent = `Level ${level} • ${n} ${label}`;
+    }
+
+    function buildBoard() {
+      const n = dotsForLevel(level);
+      updateHUD(n);
+      board.innerHTML = '';
+
+      const side = gridSide(n); // antall kolonner/rader
+      board.style.gridTemplateColumns = `repeat(${side}, 1fr)`;
+      board.style.gridTemplateRows = `repeat(${side}, 1fr)`;
+
+      // tilfeldig hvilken som er riktig
+      correctIndex = Math.floor(Math.random() * n);
+
+      for (let i = 0; i < side * side; i++) {
+        // Fyll hele rutenettet; celler etter n er tomme (holder layouten kvadratisk)
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+
+        if (i < n) {
+          const dot = document.createElement('button');
+          dot.className = 'dot';
+          dot.setAttribute('aria-label', 'Dott');
+          dot.addEventListener('click', () => handleClick(i, dot));
+          cell.appendChild(dot);
+        }
+
+        board.appendChild(cell);
+      }
+    }
+
+    function handleClick(index, el) {
+      if (index === correctIndex) {
+        vibrate(20);
+        level += 1;
+        showToast('Riktig! 🔥');
+        // Liten visuell feedback
+        el.style.transform = 'scale(0.6)';
+        setTimeout(buildBoard, 120);
+      } else {
+        vibrate(60);
+        // Feil – prøv samme level på nytt
+        showToast('Feil dott. Prøv igjen!');
+        board.classList.add('wrong');
+        setTimeout(() => board.classList.remove('wrong'), 180);
+        // reshuffle samme level
+        setTimeout(buildBoard, 140);
+      }
+    }
+
+    // Start spillet
+    buildBoard();
+
+    // Valgfritt: restart ved langtrykk med tre fingre (liten “cheat” for testing)
+    let multiTouch = new Set();
+    window.addEventListener('touchstart', (e) => {
+      [...e.touches].forEach(t => multiTouch.add(t.identifier));
+      if (multiTouch.size >= 3) {
+        level = 1;
+        showToast('Restartet til Level 1');
+        buildBoard();
+      }
+    }, {passive: true});
+    window.addEventListener('touchend', (e) => {
+      [...e.changedTouches].forEach(t => multiTouch.delete(t.identifier));
+    });
+  </script>
+</body>
+</html>
